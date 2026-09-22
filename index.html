@@ -178,8 +178,10 @@ function resetGame() {
     vx: 0, vy: 0,
     hp: 100, maxHp: 100,
     angle: 0,
+    fireAngle: 0,
     mag: MAG_SIZE,
     magMax: MAG_SIZE,
+    fireAmmo: 0,          // огненные патроны (макс 200), двойной урон
     grenades: 3,
     reloading: false,
     reloadT: 0,
@@ -348,6 +350,13 @@ const BOSS_SPITTER = {
 };
 
 // ================= PLAYER =================
+function lerpAngle(a, b, t) {
+  let d = (b - a) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
 function updatePlayer(dt) {
   let dx = 0, dy = 0;
   if (keys['KeyW'] || keys['ArrowUp']) dy -= 1;
@@ -356,17 +365,26 @@ function updatePlayer(dt) {
   if (keys['KeyD'] || keys['ArrowRight']) dx += 1;
   const len = Math.hypot(dx, dy);
   if (len > 0) { dx /= len; dy /= len; }
-  player.vx += (dx * PLAYER_SPEED - player.vx) * Math.min(1, dt * 12);
-  player.vy += (dy * PLAYER_SPEED - player.vy) * Math.min(1, dt * 12);
+  // плавный разгон и торможение (инерция без рывков)
+  const smoothMove = Math.min(1, dt * 7);
+  player.vx += (dx * PLAYER_SPEED - player.vx) * smoothMove;
+  player.vy += (dy * PLAYER_SPEED - player.vy) * smoothMove;
+  if (len === 0) {
+    // мягкая остановка при отпускании клавиш
+    player.vx *= Math.max(0, 1 - dt * 9);
+    player.vy *= Math.max(0, 1 - dt * 9);
+  }
   player.x += player.vx * dt;
   player.y += player.vy * dt;
   player.x = Math.max(PLAYER_R, Math.min(WORLD - PLAYER_R, player.x));
   player.y = Math.max(PLAYER_R, Math.min(WORLD - PLAYER_R, player.y));
 
-  // цель по мыши (в мировых координатах)
+  // цель по мыши (в мировых координатах) с плавным доворотом прицела
   const mx = mouse.x + cam.x;
   const my = mouse.y + cam.y;
-  player.angle = Math.atan2(my - player.y, mx - player.x);
+  const target = Math.atan2(my - player.y, mx - player.x);
+  player.angle = lerpAngle(player.angle, target, Math.min(1, dt * 22));
+  player.fireAngle = target;
 
   player.invuln = Math.max(0, player.invuln - dt);
   if (player.fireAnim > 0) player.fireAnim -= dt;
@@ -400,9 +418,10 @@ function updatePlayer(dt) {
   for (let i = pickups.length - 1; i >= 0; i--) {
     const p = pickups[i];
     if (Math.hypot(player.x - p.x, player.y - p.y) < PLAYER_R + p.r + 4) {
-      applyPickup(p);
-      sfx.pickup();
-      pickups.splice(i, 1);
+      if (applyPickup(p)) {
+        sfx.pickup();
+        pickups.splice(i, 1);
+      }
     }
   }
 }
@@ -414,23 +433,33 @@ function reload() {
 }
 
 function fireBullet() {
-  const speed = 760;
-  const a = player.angle + (Math.random() - 0.5) * 0.03;
+  // огненные патроны: двойной урон, больше скорость, горячий трассер
+  const fire = player.fireAmmo > 0;
+  if (fire) player.fireAmmo--;
+  const speed = fire ? 900 : 760;
+  const a = (player.fireAngle || player.angle) + (Math.random() - 0.5) * (fire ? 0.05 : 0.03);
   bullets.push({
     x: player.x + Math.cos(a) * (PLAYER_R + 10),
     y: player.y + Math.sin(a) * (PLAYER_R + 10),
     vx: Math.cos(a) * speed,
     vy: Math.sin(a) * speed,
-    life: 1.4, r: 3, dmg: 12,
+    life: 1.4, r: fire ? 4 : 3, dmg: fire ? 24 : 12, fire,
   });
   sfx.shot();
   // гильза
-  const ea = player.angle;
-  particles.push({ x: player.x, y: player.y, vx: Math.cos(ea + 1.7) * 180, vy: Math.sin(ea + 1.7) * 180, life: 0.5, r: 2, color: '#e8b24a', grav: 0, fade: 1, type: 'shell' });
+  const ea = player.fireAngle || player.angle;
+  particles.push({ x: player.x, y: player.y, vx: Math.cos(ea + 1.7) * 180, vy: Math.sin(ea + 1.7) * 180, life: 0.5, r: 2, color: fire ? '#ff8a3c' : '#e8b24a', grav: 0, fade: 1, type: 'shell' });
   // дульная вспышка искр
   for (let i = 0; i < 3; i++) {
-    const la = player.angle + (Math.random() - 0.5) * 0.8;
-    particles.push({ x: bullets[bullets.length-1].x, y: bullets[bullets.length-1].y, vx: Math.cos(la) * (200 + Math.random() * 300), vy: Math.sin(la) * (200 + Math.random() * 300), life: 0.12, r: 2, color: '#ffd25e', grav: 0, fade: 1 });
+    const la = (player.fireAngle || player.angle) + (Math.random() - 0.5) * 0.8;
+    particles.push({ x: bullets[bullets.length-1].x, y: bullets[bullets.length-1].y, vx: Math.cos(la) * (200 + Math.random() * 300), vy: Math.sin(la) * (200 + Math.random() * 300), life: 0.12, r: 2, color: fire ? (i ? '#ff8a3c' : '#fff0b0') : '#ffd25e', grav: 0, fade: 1 });
+  }
+  // языки пламени за снарядом
+  if (fire) {
+    for (let i = 0; i < 3; i++) {
+      const la = a + (Math.random() - 0.5) * 0.6;
+      particles.push({ x: bullets[bullets.length-1].x - Math.cos(a) * (6 + i * 4), y: bullets[bullets.length-1].y - Math.sin(a) * (6 + i * 4), vx: Math.cos(la) * (60 + Math.random() * 90), vy: Math.sin(la) * (60 + Math.random() * 90), life: 0.18 + Math.random() * 0.15, r: 2.5 + Math.random() * 2.5, color: Math.random() < 0.5 ? '#ff8a3c' : '#ffd25e', grav: 0, fade: 1 });
+    }
   }
   flash = 0.03;
 }
@@ -439,7 +468,7 @@ function throwGrenade() {
   if (gameState !== 'play') return;
   if (player.grenades <= 0) { sfx.empty(); return; }
   player.grenades--;
-  const a = player.angle;
+  const a = player.fireAngle || player.angle;
   const speed = 520;
   grenades.push({
     x: player.x + Math.cos(a) * 26,
@@ -660,6 +689,8 @@ function bossDeath() {
   pickups.push({ type: 'ammo', x: dropOff(2).x, y: dropOff(2).y, r: 11 });
   pickups.push({ type: 'grenade', x: dropOff(3).x, y: dropOff(3).y, r: 11 });
   pickups.push({ type: 'grenade', x: dropOff(4).x, y: dropOff(4).y, r: 11 });
+  pickups.push({ type: 'fire', x: dropOff(5).x, y: dropOff(5).y, r: 11 });
+  pickups.push({ type: 'fire', x: dropOff(6).x, y: dropOff(6).y, r: 11 });
   const heal = Math.min(50, player.maxHp - player.hp);
   player.hp += heal;
   addText(boss.x, boss.y - boss.r - 20, 'БОСС ПОВЕРЖЕН! +' + Math.round(heal) + ' HP', '#7dff7d', );
@@ -669,12 +700,21 @@ function bossDeath() {
 
 function rollDrop(z) {
   const r = Math.random();
-  if (r < 0.10) {
+  if (r < 0.08) {
     pickups.push({ type: 'medkit', x: z.x, y: z.y, r: 11 });
-  } else if (r < 0.24) {
+  } else if (r < 0.20) {
     pickups.push({ type: 'ammo', x: z.x, y: z.y, r: 11 });
-  } else if (r < 0.34) {
+  } else if (r < 0.30) {
     pickups.push({ type: 'grenade', x: z.x, y: z.y, r: 11 });
+  } else if (r < 0.42) {
+    pickups.push({ type: 'fire', x: z.x, y: z.y, r: 11 });
+  }
+}
+
+function flameHit(x, y) {
+  for (let i = 0; i < 8; i++) {
+    const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 160;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.2 + Math.random() * 0.25, r: 3 + Math.random() * 3, color: Math.random() < 0.5 ? '#ff8a3c' : '#ffd25e', grav: -40, fade: 1 });
   }
 }
 
@@ -691,7 +731,14 @@ function applyPickup(p) {
   } else if (p.type === 'grenade') {
     player.grenades += 1;
     addText(p.x, p.y - 16, '+1 граната', '#ff9a4a');
+  } else if (p.type === 'fire') {
+    if (player.fireAmmo >= 200) return false;
+    const get = 60;
+    const added = Math.min(get, 200 - player.fireAmmo);
+    player.fireAmmo = Math.min(200, player.fireAmmo + get);
+    addText(p.x, p.y - 16, '+' + added + ' огненных патронов (' + player.fireAmmo + '/200)', '#ff8a3c');
   }
+  return true;
 }
 
 // ================= BULLETS / PROJECTILES =================
@@ -715,6 +762,7 @@ function updateBullets(dt) {
       if (z.deathT >= 0) continue;
       const d = Math.hypot(b.x - z.x, b.y - z.y);
       if (d < z.r + b.r) {
+        if (b.fire) flameHit(b.x, b.y);
         damageZombie(z, b.dmg, 'bullet');
         bullets.splice(i, 1);
         break;
@@ -839,6 +887,14 @@ function render() {
   }
   if (player && player.invuln > 0) {
     ctx.fillStyle = 'rgba(255,0,0,' + (player.invuln / 0.4) * 0.08 + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+  // лёгкая оранжевая виньетка при активных огненных патронах
+  if (player && player.fireAmmo > 0) {
+    const g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.65);
+    g.addColorStop(0, 'rgba(255,120,30,0)');
+    g.addColorStop(1, 'rgba(255,90,20,0.10)');
+    ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, H);
   }
 }
@@ -1079,13 +1135,22 @@ function drawPlayer() {
 }
 
 function drawBullets() {
-  ctx.fillStyle = '#ffe9a8';
   for (const b of bullets) {
     const d = Math.hypot(b.vx, b.vy) || 1;
     ctx.save();
     ctx.translate(b.x, b.y);
     ctx.rotate(Math.atan2(b.vy, b.vx));
-    ctx.fillRect(-6, -1.5, 12, 3);
+    if (b.fire) {
+      ctx.fillStyle = '#fff0b0';
+      ctx.fillRect(-8, -2, 16, 4);
+      ctx.fillStyle = '#ff8a3c';
+      ctx.fillRect(-8, -1, 16, 2);
+      ctx.fillStyle = 'rgba(255,120,30,0.25)';
+      ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.fillStyle = '#ffe9a8';
+      ctx.fillRect(-6, -1.5, 12, 3);
+    }
     ctx.restore();
   }
 }
@@ -1163,6 +1228,28 @@ function drawPickups() {
       ctx.strokeStyle = '#555'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI * 2); ctx.stroke();
+    } else if (p.type === 'fire') {
+      // огненный патрон — пылающий трассер
+      const fl = 0.7 + Math.sin(time * 8 + p.x) * 0.3;
+      ctx.fillStyle = 'rgba(255,90,20,' + (0.25 * fl) + ')';
+      ctx.beginPath(); ctx.arc(0, 0, 15, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#c8331f';
+      roundRect(ctx, -4, -7, 8, 14, 2); ctx.fill();
+      ctx.fillStyle = '#8a1f10';
+      roundRect(ctx, -4, -7, 4, 14, 2); ctx.fill();
+      // пламя на кончике
+      ctx.fillStyle = 'rgba(255,140,60,' + fl + ')';
+      ctx.beginPath();
+      ctx.moveTo(-2.5, -7);
+      ctx.lineTo(0, -14);
+      ctx.lineTo(2.5, -7);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(255,240,180,' + fl + ')';
+      ctx.beginPath();
+      ctx.moveTo(-1.2, -7);
+      ctx.lineTo(0, -10.5);
+      ctx.lineTo(1.2, -7);
+      ctx.closePath(); ctx.fill();
     }
     ctx.restore();
   }
@@ -1309,6 +1396,26 @@ function drawHUD() {
   ctx.fillText('💣 ' + player.grenades, 206, H - 36);
   ctx.font = '11px arial'; ctx.fillStyle = '#666';
   ctx.fillText('G', 206, H - 50);
+
+  // ОГНЕННЫЕ ПАТРОНЫ (макс 200, двойной урон)
+  const fx = W - 236, fy = H - 86, fw = 220, fh = 70;
+  const fireActive = player.fireAmmo > 0;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  roundRect(ctx, fx, fy, fw, fh, 10); ctx.fill();
+  if (fireActive) {
+    ctx.strokeStyle = 'rgba(255,140,60,' + (0.4 + Math.sin(time * 6) * 0.25) + ')';
+    ctx.lineWidth = 2;
+    roundRect(ctx, fx, fy, fw, fh, 10); ctx.stroke();
+  }
+  ctx.font = 'bold 12px arial';
+  ctx.fillStyle = fireActive ? '#ff8a3c' : '#888';
+  ctx.fillText('🔥 ОГНЕННЫЕ (2x)', fx + 12, fy + 20);
+  ctx.font = 'bold 20px arial';
+  ctx.fillStyle = fireActive ? '#ffd25e' : '#555';
+  ctx.fillText(player.fireAmmo + ' / 200', fx + 12, fy + 46);
+  ctx.font = '10px arial';
+  ctx.fillStyle = fireActive ? '#ffb45e' : '#666';
+  ctx.fillText(fireActive ? 'двойной урон' : 'выпадают из зомби', fx + 12, fy + 62);
 
   ctx.textAlign = 'left';
 }
